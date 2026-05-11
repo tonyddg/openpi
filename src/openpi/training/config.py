@@ -555,6 +555,46 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
+###### MSHAB
+
+import openpi.mshab.mshab_policy as mshab_policy
+@dataclasses.dataclass(frozen=True)
+class LeRobotMSHABDataConfig(DataConfigFactory):
+    """
+    This config is used to configure transforms that are applied at various parts of the data pipeline.
+    For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
+    comments below.
+    """
+
+    # 是否使用运动坐标系表示的动作, 否则使用基座坐标系表示的动作
+    use_ref_action: bool = True
+    
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        repack_transform = mshab_policy.MSHABRepackTransform
+        data_transforms = _transforms.Group(
+            inputs=[mshab_policy.MSHABInputs(use_ref_action = self.use_ref_action, model_type = model_config.model_type)],
+            outputs=[mshab_policy.MSHABOutputs(use_ref_action = self.use_ref_action)],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        if self.use_ref_action:
+            action_sequence_keys = "actions_ref"
+        else:
+            action_sequence_keys = "actions_abs"
+
+        # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+
+            action_sequence_keys=(action_sequence_keys, ),
+        )
+
+######
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -965,6 +1005,93 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+
+    # CustomC Config
+    TrainConfig(
+        name="pi05_lora_ref_action_trajectories_tidy_house_partial_state_rot_6d_action_axis_angle",
+
+        # Pi0.5 微调
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        # The freeze filter defines which parameters should be frozen during training.
+        # We have a convenience function in the model config that returns the default freeze filter
+        # for the given model config for LoRA finetuning. Just make sure it matches the model config
+        # you chose above.
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+
+        data=LeRobotMSHABDataConfig(
+            repo_id="your_hf_username/trajectories_tidy_house_partial_state_rot_6d_action_axis_angle",
+            base_config=DataConfig(prompt_from_task=True),
+            use_ref_action=True,
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+
+        # 保存设置
+        checkpoint_base_dir="/mnt/dataset/xzmyuq/openpi_ckpts",
+        save_interval=1000,
+        keep_period=5000,
+    ),
+
+    # 
+    TrainConfig(
+        name="pi05_lora_ref_action_trajectories_tidy_house_all_state_rot_6d_action_axis_angle",
+
+        # Pi0.5 微调
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        # The freeze filter defines which parameters should be frozen during training.
+        # We have a convenience function in the model config that returns the default freeze filter
+        # for the given model config for LoRA finetuning. Just make sure it matches the model config
+        # you chose above.
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+
+        data=LeRobotMSHABDataConfig(
+            repo_id="your_hf_username/trajectories_tidy_house_all_state_rot_6d_action_axis_angle",
+            base_config=DataConfig(prompt_from_task=True),
+            use_ref_action=True,
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+
+        # 保存设置
+        checkpoint_base_dir="/mnt/dataset/xzmyuq/openpi_ckpts",
+        save_interval=1000,
+        keep_period=5000,
+    ),
+
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
