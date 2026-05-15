@@ -9,6 +9,8 @@ from openpi_client import msgpack_numpy
 import websockets.asyncio.server as _server
 import websockets.frames
 
+from openpi import transforms as _transforms
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,11 +26,17 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        max_batch_size: int | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
-        self._metadata = metadata or {}
+        self._max_batch_size = max_batch_size
+        if max_batch_size is not None:
+            policy._max_batch_size = max_batch_size
+        self._metadata = dict(metadata or {})
+        if max_batch_size is not None:
+            self._metadata["max_batch_size"] = max_batch_size
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -48,6 +56,7 @@ class WebsocketPolicyServer:
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
         packer = msgpack_numpy.Packer()
+        loop = asyncio.get_event_loop()
 
         await websocket.send(packer.pack(self._metadata))
 
@@ -56,19 +65,45 @@ class WebsocketPolicyServer:
             try:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+                batch_size = obs.pop("_batch_size", None) if isinstance(obs, dict) else None
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
-                infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
-                if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                if batch_size is not None:
+                    # --- Batch mode ---
+                    chunk_size = self._max_batch_size or batch_size
+                    all_actions = []
+                    for i in range(0, batch_size, chunk_size):
+                        end = min(i + chunk_size, batch_size)
+                        chunk = _transforms.split_dict(obs, batch_size)[i:end]
+                        actions = await loop.run_in_executor(None, self._policy.infer_batch, chunk)
+                        all_actions.extend(actions)
 
-                await websocket.send(packer.pack(action))
+                    infer_time = time.monotonic() - infer_time
+
+                    batched_result = _transforms.stack_dicts(all_actions)
+                    batched_result["_batch_size"] = batch_size
+                    for action in all_actions:
+                        action["server_timing"] = {
+                            "infer_ms": infer_time * 1000,
+                        }
+                        if prev_total_time is not None:
+                            action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                    await websocket.send(packer.pack(batched_result))
+                else:
+                    # --- Single mode ---
+                    action = await loop.run_in_executor(None, self._policy.infer, obs)
+                    infer_time = time.monotonic() - infer_time
+
+                    action["server_timing"] = {
+                        "infer_ms": infer_time * 1000,
+                    }
+                    if prev_total_time is not None:
+                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                    await websocket.send(packer.pack(action))
+
                 prev_total_time = time.monotonic() - start_time
 
             except websockets.ConnectionClosed:

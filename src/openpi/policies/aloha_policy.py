@@ -49,11 +49,21 @@ class AlohaInputs(transforms.DataTransformFn):
         # Assume that base image always exists.
         base_image = in_images["cam_high"]
 
+        # Detect batch mode from state shape (state is set later, check raw data).
+        raw_state = data["state"]
+        if raw_state.ndim == 2:
+            batch_size = raw_state.shape[0]
+            _true = np.ones(batch_size, dtype=bool)
+            _false = np.zeros(batch_size, dtype=bool)
+        else:
+            _true = np.True_
+            _false = np.False_
+
         images = {
             "base_0_rgb": base_image,
         }
         image_masks = {
-            "base_0_rgb": np.True_,
+            "base_0_rgb": _true,
         }
 
         # Add the extra images.
@@ -64,10 +74,10 @@ class AlohaInputs(transforms.DataTransformFn):
         for dest, source in extra_image_names.items():
             if source in in_images:
                 images[dest] = in_images[source]
-                image_masks[dest] = np.True_
+                image_masks[dest] = _true
             else:
                 images[dest] = np.zeros_like(base_image)
-                image_masks[dest] = np.False_
+                image_masks[dest] = _false
 
         inputs = {
             "image": images,

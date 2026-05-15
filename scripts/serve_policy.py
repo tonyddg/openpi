@@ -50,6 +50,8 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+    # Maximum batch size for batch inference. If None, batching is not advertised to clients.
+    max_batch_size: int | None = None
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -113,6 +115,7 @@ def main(args: Args) -> None:
         host="0.0.0.0",
         port=args.port,
         metadata=policy_metadata,
+        max_batch_size=args.max_batch_size,
     )
     server.serve_forever()
 

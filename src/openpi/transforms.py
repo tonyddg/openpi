@@ -259,6 +259,24 @@ class TokenizePrompt(DataTransformFn):
         else:
             state = None
 
+        if isinstance(prompt, list):
+            # Batch mode: tokenize each prompt, then stack.
+            # Flatten nested lists (some transforms may wrap the list).
+            if prompt and isinstance(prompt[0], list):
+                prompt = prompt[0]
+            all_tokens, all_masks = [], []
+            for p in prompt:
+                if not isinstance(p, str):
+                    p = p.item()
+                tokens, masks = self.tokenizer.tokenize(p, state)
+                all_tokens.append(tokens)
+                all_masks.append(masks)
+            return {
+                **data,
+                "tokenized_prompt": np.stack(all_tokens, axis=0),
+                "tokenized_prompt_mask": np.stack(all_masks, axis=0),
+            }
+
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
@@ -273,6 +291,30 @@ class TokenizeFASTInputs(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
             raise ValueError("Prompt is required")
+
+        if isinstance(prompt, list):
+            # Batch mode: tokenize each prompt, then stack.
+            # Flatten nested lists (some transforms may wrap the list).
+            if prompt and isinstance(prompt[0], list):
+                prompt = prompt[0]
+            all_tokens, all_mask, all_ar_mask, all_loss_mask = [], [], [], []
+            for p in prompt:
+                if not isinstance(p, str):
+                    p = p.item()
+                tokens, mask, ar_mask, loss_mask = self.tokenizer.tokenize(
+                    p, data["state"], data.get("actions")
+                )
+                all_tokens.append(tokens)
+                all_mask.append(mask)
+                all_ar_mask.append(ar_mask)
+                all_loss_mask.append(loss_mask)
+            return {
+                **data,
+                "tokenized_prompt": np.stack(all_tokens, axis=0),
+                "tokenized_prompt_mask": np.stack(all_mask, axis=0),
+                "token_ar_mask": np.stack(all_ar_mask, axis=0),
+                "token_loss_mask": np.stack(all_loss_mask, axis=0),
+            }
 
         if not isinstance(prompt, str):
             prompt = prompt.item()
@@ -428,6 +470,43 @@ def pad_to_dim(x: np.ndarray, target_dim: int, axis: int = -1, value: float = 0.
         pad_width[axis] = (0, target_dim - current_dim)
         return np.pad(x, pad_width, constant_values=value)
     return x
+
+
+def stack_dicts(samples: list[DataDict]) -> DataDict:
+    """Stack a list of per-sample dictionaries into a batched dictionary.
+
+    Numpy arrays are stacked along a new axis 0.
+    Strings are collected into a list (they cannot be stacked).
+    """
+    if not samples:
+        return {}
+
+    def _stack(*xs):
+        if isinstance(xs[0], str):
+            return list(xs)
+        return np.stack([np.asarray(x) for x in xs], axis=0)
+
+    return jax.tree.map(_stack, *samples)
+
+
+def split_dict(data: DataDict, batch_size: int) -> list[DataDict]:
+    """Split a batched dictionary along axis 0 into a list of per-sample dictionaries.
+
+    Numpy arrays with shape[0] == batch_size are indexed along axis 0.
+    Lists of length batch_size are indexed by position.
+    Scalars and arrays with different leading dims are left unchanged.
+    """
+    if batch_size <= 0:
+        return []
+
+    def _get_single(x, i):
+        if isinstance(x, list):
+            return x[i]
+        if isinstance(x, np.ndarray) and x.ndim > 0 and x.shape[0] == batch_size:
+            return x[i]
+        return x
+
+    return [jax.tree.map(lambda x, i=i: _get_single(x, i), data) for i in range(batch_size)]
 
 
 def make_bool_mask(*dims: int) -> tuple[bool, ...]:

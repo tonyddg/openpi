@@ -60,8 +60,18 @@ class MSHABInputs(transforms.DataTransformFn):
         wrist_image = _parse_image(data["observation/wrist_image"])
 
         # Create inputs dict. Do not change the keys in the dict below.
+        # Detect batch mode: if state is 2D, image_masks must have a batch dimension.
+        state = data["observation/state"]
+        if state.ndim == 2:
+            batch_size = state.shape[0]
+            _true = np.ones(batch_size, dtype=bool)
+            _false = np.zeros(batch_size, dtype=bool)
+        else:
+            _true = np.True_
+            _false = np.False_
+
         inputs = {
-            "state": data["observation/state"],
+            "state": state,
             "image": {
                 "base_0_rgb": base_image,
                 "left_wrist_0_rgb": wrist_image,
@@ -69,10 +79,10 @@ class MSHABInputs(transforms.DataTransformFn):
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
+                "base_0_rgb": _true,
+                "left_wrist_0_rgb": _true,
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
-                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
+                "right_wrist_0_rgb": _true if self.model_type == _model.ModelType.PI0_FAST else _false,
             },
         }
 

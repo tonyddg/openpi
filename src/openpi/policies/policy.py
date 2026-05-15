@@ -54,6 +54,7 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._max_batch_size: int | None = None
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -104,6 +105,70 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
+
+    @override
+    def infer_batch(self, obs_list: list[dict], *, noise: np.ndarray | None = None) -> list[dict]:
+        """Infer actions from a batch of observations.
+
+        Transforms are applied directly on the stacked batched dictionary
+        (TokenizePrompt is batch-aware). No per-sample iteration is needed.
+        """
+        if not obs_list:
+            return []
+        actual_bs = len(obs_list)
+
+        # Pad to next power of two (capped at max_batch_size) so each batch size
+        # reuses the same JIT-compiled graph, without excessive wasted computation.
+        target_bs = 1 << (actual_bs - 1).bit_length()
+        if self._max_batch_size:
+            target_bs = min(target_bs, self._max_batch_size)
+        if actual_bs < target_bs:
+            obs_list = obs_list + [obs_list[-1]] * (target_bs - actual_bs)
+
+        # 1. Stack raw observations into a batched dict (arrays stacked, strings collected into list).
+        inputs = _transforms.stack_dicts(obs_list)
+
+        # 2. Apply transforms directly on batched data.
+        inputs = self._input_transform(inputs)
+
+        # 3. Convert to framework arrays (no [np.newaxis] — batch dim already present).
+        if not self._is_pytorch_model:
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
+        else:
+            inputs = jax.tree.map(
+                lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device), inputs
+            )
+            sample_rng_or_pytorch_device = self._pytorch_device
+
+        # 4. Model inference.
+        sample_kwargs = dict(self._sample_kwargs)
+        if noise is not None:
+            noise_t = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
+            sample_kwargs["noise"] = noise_t
+
+        observation = _model.Observation.from_dict(inputs)
+        start_time = time.monotonic()
+        outputs = {
+            "state": inputs["state"],
+            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+        }
+        model_time = time.monotonic() - start_time
+
+        # 5. Convert to numpy (no [0, ...] stripping — keep batch dim).
+        if self._is_pytorch_model:
+            outputs = jax.tree.map(lambda x: np.asarray(x.detach().cpu()), outputs)
+        else:
+            outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+
+        # 6. Apply output transforms directly on batched data.
+        outputs = self._output_transform(outputs)
+
+        # 7. Split back to per-sample results (include padding), then trim.
+        results = _transforms.split_dict(outputs, target_bs)
+        for r in results:
+            r["policy_timing"] = {"infer_ms": model_time * 1000}
+        return results[:actual_bs]
 
     @property
     def metadata(self) -> dict[str, Any]:
