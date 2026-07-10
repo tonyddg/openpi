@@ -18,12 +18,13 @@ MSHABRepackTransform = transforms.Group(
     inputs=[
         transforms.RepackTransform(
             {
-                # 之前训练头部与手部写反了
-                "observation/image": "fetch_head",
-                "observation/wrist_image": "fetch_hand",
-                "observation/state": "state",
-                "actions/abs": "actions_abs",
-                "actions/ref": "actions_ref",
+                "observation/image": "head_rgb",
+                "observation/wrist_image": "gripper_rgb",
+                "observation/state": "pi0_state",
+
+                # "actions/abs": "pi0_actions_abs",
+                "actions/ref": "pi0_actions_ref",
+                "actions/policy": "policy_action",
                 "prompt": "prompt",
             }
         )
@@ -43,7 +44,7 @@ class MSHABInputs(transforms.DataTransformFn):
     # Do not change this for your own dataset.
     model_type: _model.ModelType
 
-    # 是否使用运动坐标系表示的动作, 否则使用基座坐标系表示的动作
+    # 是否使用运动坐标系表示的动作, 否则使用 MSHAB 原始全身动作
     use_ref_action: bool = True
 
     def __call__(self, data: dict) -> dict:
@@ -93,7 +94,8 @@ class MSHABInputs(transforms.DataTransformFn):
                 inputs["actions"] = data["actions/ref"]
         else:
             if "actions/abs" in data:
-                inputs["actions"] = data["actions/abs"]
+                raise NotImplementedError("abs actions are not implemented")
+                # inputs["actions"] = data["actions/abs"]
 
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
@@ -112,7 +114,7 @@ class MSHABOutputs(transforms.DataTransformFn):
     For your own dataset, you can copy this class and modify the action dimension based on the comments below.
     """
 
-    # 是否使用运动坐标系表示的动作, 否则使用基座坐标系表示的动作
+    # 是否使用运动坐标系表示的动作, 否则使用 MSHAB 原始全身动作
     use_ref_action: bool = True
 
     def __call__(self, data: dict) -> dict:
@@ -121,6 +123,6 @@ class MSHABOutputs(transforms.DataTransformFn):
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
         if self.use_ref_action:
-            return {"actions_ref": np.asarray(data["actions"][:, :7])}
+            return {"pi0_actions_ref": np.asarray(data["actions"][..., :7])}
         else:
-            return {"actions_abs": np.asarray(data["actions"][:, :7])}
+            raise NotImplementedError("abs actions are not implemented")
