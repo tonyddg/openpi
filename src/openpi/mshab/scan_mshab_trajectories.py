@@ -89,9 +89,9 @@ def collect_runs_in_dir(path: Path) -> List[tuple[str, Optional[Path], Optional[
 
 def collect_trajectory_records(
     dataset_root: Path,
-    task_filter: Optional[str] = None,
-    subtask_filter: Optional[str] = None,
-    obj_name_filter: Optional[str] = None,
+    task_filter: Optional[list[str]] = None,
+    subtask_filter: Optional[list[str]] = None,
+    obj_name_filter: Optional[list[str]] = None,
 ) -> List[TrajectoryRecord]:
     records: List[TrajectoryRecord] = []
 
@@ -107,11 +107,11 @@ def collect_trajectory_records(
 
         task, subtask, _split, obj_name = parsed
 
-        if task_filter is not None and task != task_filter:
+        if task_filter is not None and task not in task_filter:
             continue
-        if subtask_filter is not None and subtask != subtask_filter:
+        if subtask_filter is not None and subtask not in subtask_filter:
             continue
-        if obj_name_filter is not None and obj_name != obj_name_filter:
+        if obj_name_filter is not None and obj_name not in obj_name_filter:
             continue
 
         runs = collect_runs_in_dir(path)
@@ -206,6 +206,14 @@ PLACE_TEMPLATES_WITH_TARGET: List[str] = [
     "put the {obj} down in the {target}",
 ]
 
+OPEN_TEMPLATES: List[str] = [
+    "open the {obj}.",
+]
+
+CLOSE_TEMPLATES = [
+    "close the {obj}.",
+]
+
 DEFAULT_TEMPLATE_MAP: Dict[str, Dict[str, List[str]]] = {
     "pick": {
         "default": PICK_TEMPLATES,
@@ -215,6 +223,12 @@ DEFAULT_TEMPLATE_MAP: Dict[str, Dict[str, List[str]]] = {
         "default": PLACE_TEMPLATES,
         "target": PLACE_TEMPLATES_WITH_TARGET,
     },
+    "open": {
+        "default": OPEN_TEMPLATES
+    },
+    "close": {
+        "default": CLOSE_TEMPLATES
+    }
 }
 
 def sample_language_instruction(
@@ -257,9 +271,6 @@ def sample_language_instruction(
     return template.format(
         obj = obj_text,
         target = target,
-        task = record.task,
-        subtask = subtask,
-        obj_name = record.obj_name,
     )
 
 def main() -> None:
