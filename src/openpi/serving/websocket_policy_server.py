@@ -71,6 +71,7 @@ class WebsocketPolicyServer:
 
                 if batch_size is not None:
                     # --- Batch mode ---
+                    chunk_count = 0
                     chunk_size = self._max_batch_size or batch_size
                     all_actions = []
                     for i in range(0, batch_size, chunk_size):
@@ -78,11 +79,11 @@ class WebsocketPolicyServer:
                         chunk = _transforms.split_dict(obs, batch_size)[i:end]
                         actions = await loop.run_in_executor(None, self._policy.infer_batch, chunk)
                         all_actions.extend(actions)
+                        chunk_count += 1
 
                     infer_time = time.monotonic() - infer_time
+                    logger.info("batch=%d, chunks=%d, infer=%.0fms", batch_size, chunk_count, infer_time * 1000)
 
-                    batched_result = _transforms.stack_dicts(all_actions)
-                    batched_result["_batch_size"] = batch_size
                     for action in all_actions:
                         action["server_timing"] = {
                             "infer_ms": infer_time * 1000,
@@ -90,11 +91,14 @@ class WebsocketPolicyServer:
                         if prev_total_time is not None:
                             action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
+                    batched_result = _transforms.stack_dicts(all_actions)
+                    batched_result["_batch_size"] = batch_size
                     await websocket.send(packer.pack(batched_result))
                 else:
                     # --- Single mode ---
                     action = await loop.run_in_executor(None, self._policy.infer, obs)
                     infer_time = time.monotonic() - infer_time
+                    logger.info("batch=1, infer=%.0fms", infer_time * 1000)
 
                     action["server_timing"] = {
                         "infer_ms": infer_time * 1000,
