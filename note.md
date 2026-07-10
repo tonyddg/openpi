@@ -153,8 +153,9 @@ class XXXDataConfig(DataConfigFactory):
 通用训练参数
 ```py
 batch_size=32, # LoRA 微调中，Batch Size 取 32 约用完 80G
+# batch_size * step, 不按 epoch
 num_train_steps=30_000,
-
+# 用于全量, LoRA 微调使用默认的学习率调度参数 (即不显示传入该参数)
 lr_schedule=_optimizer.CosineDecaySchedule(
     warmup_steps=10_000,
     peak_lr=5e-5,
@@ -171,7 +172,10 @@ keep_period=5000, # 长期保存间隔，LoRA 参数约 9G
 
 模型选择参数（全量微调 pi0.5）
 ```py
-model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+model=pi0_config.Pi0Config(
+    pi05=True, action_horizon=10, 
+    discrete_state_input=False
+),
 ema_decay=0.999,
 weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
 ```
@@ -183,15 +187,26 @@ model=pi0_config.Pi0Config(
     action_horizon=10,  # 动作块长度
     discrete_state_input=False,
     # LoRA 微调
+    # 取 gemma_2b 可以全量训练 VLM 主干
     paligemma_variant="gemma_2b_lora",
+    # 取 gemma_300m 可以全量训练 Action Expert
     action_expert_variant="gemma_300m_lora",
 ),
+# freeze_filter 通常要和 model 的 Pi0Config 保持一致, 再调用 get_freeze_filter 方法
 freeze_filter=pi0_config.Pi0Config(
+    pi05=True, action_horizon=10,
+    # 必须保持一致 !!!
     paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
 ).get_freeze_filter(),
 # Turn off EMA for LoRA finetuning.
 ema_decay=None,
 ```
+
+关于 pi0.5 中的 pi0_config.Pi0Config 的 `discrete_state_input` 参数
+1. pi0.5 中，本体感知并不进入动作专家，而是合并到 prompt 中
+2. 先将 state 每个维度归一化到 [-1, 1] 再依据分位映射为 0~255，得到一串字符串如 119 35 170 201 255
+3. 然后与原始 prompt 合并得到实际 prompt 例如：`Task: tidy the house, State: 127 191 25; Action:`
+4. `discrete_state_input` 取 False 时则不会有 State 部分, 即本体感知被忽略了
 
 #### 微调脚本
 
@@ -279,6 +294,12 @@ dataset.finalize()
 
 ```bash
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 uv run scripts/serve_policy.py policy:checkpoint --policy.config 训练配置 --policy.dir 模型文件夹
+```
+
+例如 
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.6 uv run scripts/serve_policy.py policy:checkpoint --policy.config pi05_lora_ref_action_trajectories_tidy_house_all_state_rot_6d_action_axis_angle --policy.dir /mnt/dataset/xzmyuq/openpi_ckpts/pi05_lora_ref_action_trajectories_tidy_house_all_state_rot_6d_action_axis_angle/pi05_lora_ref_action_trajectories_tidy_house_all_state_rot_6d_action_axis_angle/29999
 ```
 
 #### 客户端
