@@ -558,6 +558,7 @@ class TrainConfig:
 ###### MSHAB
 
 import openpi.mshab.mshab_policy as mshab_policy
+import openpi.mshab.mshab_qpos_policy as mshab_qpos_policy
 @dataclasses.dataclass(frozen=True)
 class LeRobotMSHABDataConfig(DataConfigFactory):
     """
@@ -566,23 +567,38 @@ class LeRobotMSHABDataConfig(DataConfigFactory):
     comments below.
     """
 
-    # 是否使用运动坐标系表示的动作, 否则使用基座坐标系表示的动作
+    # 是否使用运动坐标系表示的动作, 否则使用 MSHAB 原始全身动作
     use_ref_action: bool = True
+    # 是否使用 6D 位姿, 而不是 Fetch 原始动作表示
+    is_6d_action: bool = True
+    # 使用 Fetch 原始动作表示时, 是否使用与 6d 输出策略相同的 eef 位姿观测
+    use_6d_state: bool = True
     
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
 
-        repack_transform = mshab_policy.MSHABRepackTransform
-        data_transforms = _transforms.Group(
-            inputs=[mshab_policy.MSHABInputs(use_ref_action = self.use_ref_action, model_type = model_config.model_type)],
-            outputs=[mshab_policy.MSHABOutputs(use_ref_action = self.use_ref_action)],
-        )
+        if self.is_6d_action:
+            repack_transform = mshab_policy.MSHABRepackTransform
+            data_transforms = _transforms.Group(
+                inputs=[mshab_policy.MSHABInputs(use_ref_action = self.use_ref_action, model_type = model_config.model_type)],
+                outputs=[mshab_policy.MSHABOutputs(use_ref_action = self.use_ref_action)],
+            )
+        else:
+            repack_transform = mshab_qpos_policy.MSHABQposRepackTransform
+            data_transforms = _transforms.Group(
+                inputs=[mshab_qpos_policy.MSHABQposInputs(use_6d_state = self.use_6d_state, model_type = model_config.model_type)],
+                outputs=[mshab_qpos_policy.MSHABQposOutputs()],
+            )
+
         model_transforms = ModelTransformFactory()(model_config)
 
-        if self.use_ref_action:
-            action_sequence_keys = "actions_ref"
+        if self.is_6d_action:
+            if self.use_ref_action:
+                action_sequence_keys = ("pi0_actions_ref", )
+            else:
+                action_sequence_keys = ("pi0_actions_abs", )
         else:
-            action_sequence_keys = "actions_abs"
+            action_sequence_keys = ("pi0_actions_ref", "policy_action")
 
         # We return all data transforms for training and inference. No need to change anything here.
         return dataclasses.replace(
@@ -591,8 +607,125 @@ class LeRobotMSHABDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
 
-            action_sequence_keys=(action_sequence_keys, ),
+            action_sequence_keys = action_sequence_keys
         )
+
+mshab_finetune_config = dict(
+    full_lora_legacy = dict(
+        paligemma_variant = "gemma_2b_lora",
+        action_expert_variant = "gemma_300m_lora",
+        batch_size = 32,
+        lr_schedule = _optimizer.CosineDecaySchedule(
+            warmup_steps = 1_000,
+            peak_lr = 2.5e-5,
+            decay_steps = 30_000,
+            decay_lr = 2.5e-6,
+        ),
+        num_train_steps = 30_000,
+        ema_decay = None
+    ),
+    full_lora = dict(
+        paligemma_variant = "gemma_2b_lora",
+        action_expert_variant = "gemma_300m_lora",
+        batch_size = 128,
+        lr_schedule = _optimizer.CosineDecaySchedule(
+            warmup_steps = 1_000,
+            peak_lr = 5e-5,
+            decay_steps = 50_000,
+            decay_lr = 1e-5,
+        ),
+        num_train_steps = 50_000,
+        ema_decay = None
+    ),
+    ae_full_vlm_lora = dict(
+        paligemma_variant = "gemma_2b_lora",
+        action_expert_variant = "gemma_300m",
+        batch_size = 64,
+        lr_schedule = _optimizer.CosineDecaySchedule(
+            warmup_steps = 2_000,
+            peak_lr = 5e-5,
+            decay_steps = 150_000,
+            decay_lr = 1e-5,
+        ),
+        num_train_steps = 75_000,
+        ema_decay = None
+    ),
+    full_finetune = dict(
+        paligemma_variant = "gemma_2b",
+        action_expert_variant = "gemma_300m",
+        batch_size = 32,
+        lr_schedule = _optimizer.CosineDecaySchedule(
+            warmup_steps = 5_000,
+            peak_lr = 3e-5,
+            decay_steps = 300_000,
+            decay_lr = 5e-6,
+        ),
+        num_train_steps = 200_000,
+        ema_decay = None
+    ),
+)
+
+def make_mshab_train_config(
+    name: str,
+    repo_id: str,
+
+    finetune_type: Literal["full_lora_legacy", "full_lora", "full_finetune", "ae_full_vlm_lora"] = "full_lora_legacy",
+    discrete_state_input: bool = False,
+    is_direct_pi0: bool = False,
+
+    add_name_prefix: bool = False
+):
+    finetune_config = mshab_finetune_config[finetune_type]
+    model_config = pi0_config.Pi0Config(
+        pi05 = True, action_horizon = 10, discrete_state_input = discrete_state_input,
+        paligemma_variant = finetune_config["paligemma_variant"],  # type: ignore
+        action_expert_variant = finetune_config["action_expert_variant"] # type: ignore
+    )
+
+    if add_name_prefix:
+        name += "_"
+        name += finetune_type
+        
+        if discrete_state_input:
+            name += "_state_input"
+        else:
+            name += "_no_state"
+        
+        if is_direct_pi0:
+            name += "_qpos_action"
+        else:
+            name += "_ref_action"
+
+    return TrainConfig(
+        name = name,
+
+        model=model_config,
+        freeze_filter=model_config.get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=finetune_config["ema_decay"], # type: ignore
+
+        data=LeRobotMSHABDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+            use_ref_action=True,
+            is_6d_action = not is_direct_pi0,
+            use_6d_state = not is_direct_pi0
+        ),
+        batch_size=finetune_config["batch_size"], # type: ignore
+
+        lr_schedule=finetune_config["lr_schedule"], # type: ignore
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=finetune_config["num_train_steps"], # type: ignore
+
+        # 保存设置
+        checkpoint_base_dir="/media/openpi_ckpts",
+        save_interval=1000,
+        keep_period=50000, # type: ignore
+        
+        # 云平台有足够的 CPU 资源
+        num_workers = 8,
+    )
 
 ######
 
@@ -1007,90 +1140,412 @@ _CONFIGS = [
     ),
 
     # CustomC Config
-    TrainConfig(
-        name="pi05_lora_ref_action_trajectories_tidy_house_partial_state_rot_6d_action_axis_angle",
+    ###
 
-        # Pi0.5 微调
-        model=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        # The freeze filter defines which parameters should be frozen during training.
-        # We have a convenience function in the model config that returns the default freeze filter
-        # for the given model config for LoRA finetuning. Just make sure it matches the model config
-        # you chose above.
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
-        ema_decay=None,
-
-        data=LeRobotMSHABDataConfig(
-            repo_id="your_hf_username/trajectories_tidy_house_partial_state_rot_6d_action_axis_angle",
-            base_config=DataConfig(prompt_from_task=True),
-            use_ref_action=True,
-        ),
-        batch_size=32,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=30_000,
-
-        # 保存设置
-        checkpoint_base_dir="/mnt/dataset/xzmyuq/openpi_ckpts",
-        save_interval=1000,
-        keep_period=5000,
+    # 输出目标点, tidy house 全部数据
+    make_mshab_train_config(
+        "pi05_lora_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        'full_lora_legacy',
+        discrete_state_input = False,
+    ),
+    ## action expert 全量微调 ref action
+    # tidy house
+    make_mshab_train_config(
+        "pi05_tidy_house_ae_full_vlm_lora_no_state",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+    ),
+    # set table (open / close)
+    make_mshab_train_config(
+        "pi05_set_table_open_close_ae_full_vlm_lora_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+    ),
+    # set table (pick / place)
+    make_mshab_train_config(
+        "pi05_set_table_pick_place_ae_full_vlm_lora_no_state",
+        "trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+    ),
+    # tidy house with state
+    make_mshab_train_config(
+        "pi05_tidy_house_ae_full_vlm_lora_with_state",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = True,
     ),
 
-    # 
-    TrainConfig(
-        name="pi05_lora_ref_action_trajectories_tidy_house_all_state_rot_6d_action_axis_angle",
-
-        # Pi0.5 微调
-        model=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, discrete_state_input=False,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        # The freeze filter defines which parameters should be frozen during training.
-        # We have a convenience function in the model config that returns the default freeze filter
-        # for the given model config for LoRA finetuning. Just make sure it matches the model config
-        # you chose above.
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
-        ema_decay=None,
-
-        data=LeRobotMSHABDataConfig(
-            repo_id="your_hf_username/trajectories_tidy_house_all_state_rot_6d_action_axis_angle",
-            base_config=DataConfig(prompt_from_task=True),
-            use_ref_action=True,
-        ),
-        batch_size=32,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=30_000,
-
-        # 保存设置
-        checkpoint_base_dir="/mnt/dataset/xzmyuq/openpi_ckpts",
-        save_interval=1000,
-        keep_period=5000,
+    ## action expert 全量微调 qpos
+    # tidy house
+    make_mshab_train_config(
+        "pi05_tidy_house_ae_full_vlm_lora_direct_pi0_no_state",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+        is_direct_pi0 = True
     ),
+    # TrainConfig(
+    #     name="pi05_lora_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=False,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     # The freeze filter defines which parameters should be frozen during training.
+    #     # We have a convenience function in the model config that returns the default freeze filter
+    #     # for the given model config for LoRA finetuning. Just make sure it matches the model config
+    #     # you chose above.
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+        
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # # 输出目标点, tidy house 全部数据，明确使用本体感知
+    # TrainConfig(
+    #     name="pi05_lora_full_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     # The freeze filter defines which parameters should be frozen during training.
+    #     # We have a convenience function in the model config that returns the default freeze filter
+    #     # for the given model config for LoRA finetuning. Just make sure it matches the model config
+    #     # you chose above.
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+        
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # # 输出 Fetch 原始动作, Tidy house 全部数据, 无本体感知
+    # TrainConfig(
+    #     name="pi05_lora_qpos_action_tidy_house_all_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=False,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     # The freeze filter defines which parameters should be frozen during training.
+    #     # We have a convenience function in the model config that returns the default freeze filter
+    #     # for the given model config for LoRA finetuning. Just make sure it matches the model config
+    #     # you chose above.
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         is_6d_action = False,
+    #         use_6d_state = True
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+        
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # # 输出 Fetch 原始动作, Tidy house 全部数据, 明确使用 qpos 观测
+    make_mshab_train_config(
+        "pi05_lora_full_qpos_action_tidy_house_all_state_rot_6d_action_axis_angle",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        'full_lora_legacy',
+        discrete_state_input = True,
+        is_direct_pi0 = True
+    ),
+    # TrainConfig(
+    #     name="pi05_lora_full_qpos_action_tidy_house_all_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     # The freeze filter defines which parameters should be frozen during training.
+    #     # We have a convenience function in the model config that returns the default freeze filter
+    #     # for the given model config for LoRA finetuning. Just make sure it matches the model config
+    #     # you chose above.
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora", 
+    #         action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         is_6d_action = False,
+    #         use_6d_state = False,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+        
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # ###
+    # TrainConfig(
+    #     name="pi05_lora_ref_action_trajectories_set_table_all_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=False,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_set_table_all_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+
+    # # SetTable Open / Close
+    # TrainConfig(
+    #     name="pi05_lora_ref_action_set_table_open_close_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=False,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # # SetTable Open / Close, 明确使用本体感知
+    # TrainConfig(
+    #     name="pi05_lora_full_ref_action_set_table_open_close_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=True,
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    # # SetTable Pick / Place
+    # TrainConfig(
+    #     name="pi05_lora_ref_action_trajectories_set_table_pick_place_state_rot_6d_action_axis_angle",
+
+    #     # Pi0.5 微调
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True, action_horizon=10, discrete_state_input=False,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     # Turn off EMA for LoRA finetuning.
+    #     ema_decay=None,
+
+    #     data=LeRobotMSHABDataConfig(
+    #         repo_id="trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         use_ref_action=True,
+    #     ),
+    #     batch_size=32,
+
+    #     lr_schedule=_optimizer.CosineDecaySchedule(
+    #         warmup_steps=1_000,
+    #         peak_lr=2.5e-5,
+    #         decay_steps=30_000,
+    #         decay_lr=2.5e-6,
+    #     ),
+    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    #     num_train_steps=30_000,
+
+    #     # 保存设置
+    #     checkpoint_base_dir="/media/openpi_ckpts",
+    #     save_interval=1000,
+    #     keep_period=25000,
+
+    #     # 云平台有足够的 CPU 资源
+    #     num_workers = 8,
+    # ),
+    ###
 
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
