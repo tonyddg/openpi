@@ -158,11 +158,11 @@ def append_mshab_trajectory_to_dataset(
                 policy_action_clip = np.clip(policy_action, -1, 1)
 
                 pi0_actions_ref_clip = np.array(episode_group["info/pi0_eef_ref_action"][frame_idx + 1, :]) # type: ignore
-                # MSHAB 记录的动作讲直接保存模型输出, 需要压缩到有效范围 [-1, 1] 内
+                # MSHAB 记录的动作讲直接保存模型输出, 需要压缩到有效范围 [-1, 1] 内 (-1 为夹爪动作)
                 pi0_actions_ref_clip[-1] = np.clip(pi0_actions_ref_clip[-1], -1, 1)
 
                 pi0_actions_abs_clip = np.array(episode_group["info/pi0_eef_abs_action"][frame_idx + 1, :]) # type: ignore
-                # MSHAB 记录的动作讲直接保存模型输出, 需要压缩到有效范围 [-1, 1] 内
+                # MSHAB 记录的动作讲直接保存模型输出, 需要压缩到有效范围 [-1, 1] 内 (-1 为夹爪动作)
                 pi0_actions_abs_clip[-1] = np.clip(pi0_actions_abs_clip[-1], -1, 1)
 
                 dataset.add_frame(
