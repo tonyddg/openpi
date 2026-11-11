@@ -5,8 +5,10 @@ from collections.abc import Sequence
 import dataclasses
 import difflib
 import logging
+import os
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
+import sys
+from typing import Any, Literal, Optional, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -611,23 +613,28 @@ class LeRobotMSHABDataConfig(DataConfigFactory):
         )
 
 mshab_finetune_config = dict(
+    # LIBERO 默认配置, 偏保守
     full_lora_legacy = dict(
+        # 选择 VLM 主干与动作专家为全量微调还是 LoRA 微调
         paligemma_variant = "gemma_2b_lora",
         action_expert_variant = "gemma_300m_lora",
+        # batch size
         batch_size = 32,
+        # 学习率调度
         lr_schedule = _optimizer.CosineDecaySchedule(
             warmup_steps = 1_000,
             peak_lr = 2.5e-5,
             decay_steps = 30_000,
             decay_lr = 2.5e-6,
         ),
+        # 更新 step (不按 Epoch 训练)
         num_train_steps = 30_000,
         ema_decay = None
     ),
     full_lora = dict(
         paligemma_variant = "gemma_2b_lora",
         action_expert_variant = "gemma_300m_lora",
-        batch_size = 128,
+        batch_size = 32,
         lr_schedule = _optimizer.CosineDecaySchedule(
             warmup_steps = 1_000,
             peak_lr = 5e-5,
@@ -673,7 +680,9 @@ def make_mshab_train_config(
     discrete_state_input: bool = False,
     is_direct_pi0: bool = False,
 
-    add_name_prefix: bool = False
+    add_name_prefix: bool = False,
+    # 默认从环境变量 OPENPI_CKPT_BASE 读取
+    checkpoint_base_dir: Optional[str] = None
 ):
     finetune_config = mshab_finetune_config[finetune_type]
     model_config = pi0_config.Pi0Config(
@@ -681,6 +690,8 @@ def make_mshab_train_config(
         paligemma_variant = finetune_config["paligemma_variant"],  # type: ignore
         action_expert_variant = finetune_config["action_expert_variant"] # type: ignore
     )
+    if checkpoint_base_dir is None:
+        checkpoint_base_dir = os.environ.get("OPENPI_CKPT_BASE", "/media/openpi_ckpts")
 
     if add_name_prefix:
         name += "_"
@@ -719,7 +730,96 @@ def make_mshab_train_config(
         num_train_steps=finetune_config["num_train_steps"], # type: ignore
 
         # 保存设置
-        checkpoint_base_dir="/media/openpi_ckpts",
+        checkpoint_base_dir=checkpoint_base_dir,
+        save_interval=1000,
+        keep_period=50000, # type: ignore
+        
+        # 云平台有足够的 CPU 资源
+        num_workers = 8,
+    )
+
+##### tianyi
+
+import openpi.tianyi.tianyi_policy as tianyi_policy
+@dataclasses.dataclass(frozen=True)
+class LeRobotTianyiDataConfig(DataConfigFactory):
+    """
+    This config is used to configure transforms that are applied at various parts of the data pipeline.
+    For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
+    comments below.
+    """
+    
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        repack_transform = tianyi_policy.TianyiRepackTransform
+        data_transforms = _transforms.Group(
+            inputs=[tianyi_policy.TianyiInputs(model_type = model_config.model_type)],
+            outputs=[tianyi_policy.TianyiOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+        action_sequence_keys = ("pi0_actions_ref", )
+
+        # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+
+            action_sequence_keys = action_sequence_keys
+        )
+
+def make_tianyi_train_config(
+    name: str,
+    repo_id: str,
+
+    finetune_type: Literal["full_lora_legacy", "full_lora", "full_finetune", "ae_full_vlm_lora"] = "full_lora_legacy",
+    discrete_state_input: bool = False,
+
+    add_name_prefix: bool = False,
+    # 默认从环境变量 OPENPI_CKPT_BASE 读取
+    checkpoint_base_dir: Optional[str] = None
+):
+    finetune_config = mshab_finetune_config[finetune_type]
+    model_config = pi0_config.Pi0Config(
+        pi05 = True, action_horizon = 10, discrete_state_input = discrete_state_input,
+        paligemma_variant = finetune_config["paligemma_variant"],  # type: ignore
+        action_expert_variant = finetune_config["action_expert_variant"] # type: ignore
+    )
+    if checkpoint_base_dir is None:
+        checkpoint_base_dir = os.environ.get("OPENPI_CKPT_BASE", "/media/openpi_ckpts")
+
+    if add_name_prefix:
+        name += "_"
+        name += finetune_type
+        
+        if discrete_state_input:
+            name += "_state_input"
+        else:
+            name += "_no_state"
+
+    return TrainConfig(
+        name = name,
+
+        model=model_config,
+        freeze_filter=model_config.get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=finetune_config["ema_decay"], # type: ignore
+
+        data=LeRobotTianyiDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=finetune_config["batch_size"], # type: ignore
+
+        lr_schedule=finetune_config["lr_schedule"], # type: ignore
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=finetune_config["num_train_steps"], # type: ignore
+
+        # 保存设置
+        checkpoint_base_dir=checkpoint_base_dir,
         save_interval=1000,
         keep_period=50000, # type: ignore
         
@@ -1139,39 +1239,32 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
 
-    # CustomC Config
-    ###
+    #### CustomC Config
 
-    # 输出目标点, tidy house 全部数据
+    ### ref action 输出目标点
+    ## tidy house 全部数据
+    # 兼容旧 checkpoint
     make_mshab_train_config(
         "pi05_lora_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
         "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
         'full_lora_legacy',
         discrete_state_input = False,
     ),
-    ## action expert 全量微调 ref action
-    # tidy house
+    # 新 Lora
+    make_mshab_train_config(
+        "pi05_tidy_house_full_lora_strong_no_state",
+        "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
+        "full_lora",
+        discrete_state_input = False,
+    ),
+    # action expert 全量微调
     make_mshab_train_config(
         "pi05_tidy_house_ae_full_vlm_lora_no_state",
         "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
         'ae_full_vlm_lora',
         discrete_state_input = False,
     ),
-    # set table (open / close)
-    make_mshab_train_config(
-        "pi05_set_table_open_close_ae_full_vlm_lora_no_state",
-        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
-        'ae_full_vlm_lora',
-        discrete_state_input = False,
-    ),
-    # set table (pick / place)
-    make_mshab_train_config(
-        "pi05_set_table_pick_place_ae_full_vlm_lora_no_state",
-        "trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
-        'ae_full_vlm_lora',
-        discrete_state_input = False,
-    ),
-    # tidy house with state
+    # action expert tidy house with state
     make_mshab_train_config(
         "pi05_tidy_house_ae_full_vlm_lora_with_state",
         "trajectories_tidy_house_all_bc_with_qvel_state_rot_6d_action_axis_angle_train",
@@ -1179,7 +1272,38 @@ _CONFIGS = [
         discrete_state_input = True,
     ),
 
-    ## action expert 全量微调 qpos
+    ## ref action 输出目标点, set table (open / close)
+    # action expert 全量微调
+    make_mshab_train_config(
+        "pi05_set_table_open_close_ae_full_vlm_lora_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+    ),
+    # 新 Lora
+    make_mshab_train_config(
+        "pi05_set_table_open_close_full_lora_strong_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        "full_lora",
+        discrete_state_input = False,
+    ),
+    ## ref action 输出目标点, set table (pick / place)
+    # action expert 全量微调
+    make_mshab_train_config(
+        "pi05_set_table_pick_place_ae_full_vlm_lora_no_state",
+        "trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+        'ae_full_vlm_lora',
+        discrete_state_input = False,
+    ),
+    # 新 Lora
+    make_mshab_train_config(
+        "pi05_set_table_pick_place_full_lora_strong_no_state",
+        "trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+        "full_lora",
+        discrete_state_input = False,
+    ),
+
+    ## 直接输出关节动作
     # tidy house
     make_mshab_train_config(
         "pi05_tidy_house_ae_full_vlm_lora_direct_pi0_no_state",
@@ -1188,6 +1312,46 @@ _CONFIGS = [
         discrete_state_input = False,
         is_direct_pi0 = True
     ),
+    # set table (open / close)
+    make_mshab_train_config(
+        "pi05_set_table_open_close_full_lora_direct_pi0_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        'full_lora_legacy',
+        discrete_state_input = False,
+        is_direct_pi0 = True
+    ),
+    make_mshab_train_config(
+        "pi05_set_table_open_close_ae_full_vlm_lora_direct_pi0_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        "ae_full_vlm_lora",
+        discrete_state_input = False,
+        is_direct_pi0 = True
+    ),
+    # set table (pick / place)
+    make_mshab_train_config(
+        "pi05_set_table_pick_place_full_lora_direct_pi0_no_state",
+        "trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+        'full_lora_legacy',
+        discrete_state_input = False,
+        is_direct_pi0 = True
+    ),
+    make_mshab_train_config(
+        "pi05_set_table_pick_place_ae_full_vlm_lora_direct_pi0_no_state",
+        "trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+        "ae_full_vlm_lora",
+        discrete_state_input = False,
+        is_direct_pi0 = True
+    ),
+
+    ### Tianyi
+
+    make_tianyi_train_config(
+        "tianyi_test",
+        "tianyi_test",
+        "ae_full_vlm_lora",
+        discrete_state_input = False,
+    ),
+
     # TrainConfig(
     #     name="pi05_lora_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
 
@@ -1421,47 +1585,47 @@ _CONFIGS = [
     #     num_workers = 8,
     # ),
 
-    # # SetTable Open / Close
-    # TrainConfig(
-    #     name="pi05_lora_ref_action_set_table_open_close_state_rot_6d_action_axis_angle",
+    # SetTable Open / Close
+    TrainConfig(
+        name="pi05_lora_ref_action_set_table_open_close_state_rot_6d_action_axis_angle",
 
-    #     # Pi0.5 微调
-    #     model=pi0_config.Pi0Config(
-    #         pi05=True, action_horizon=10, discrete_state_input=False,
-    #         paligemma_variant="gemma_2b_lora",
-    #         action_expert_variant="gemma_300m_lora",
-    #     ),
-    #     freeze_filter=pi0_config.Pi0Config(
-    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-    #     ).get_freeze_filter(),
-    #     # Turn off EMA for LoRA finetuning.
-    #     ema_decay=None,
+        # Pi0.5 微调
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
 
-    #     data=LeRobotMSHABDataConfig(
-    #         repo_id="trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
-    #         base_config=DataConfig(prompt_from_task=True),
-    #         use_ref_action=True,
-    #     ),
-    #     batch_size=32,
+        data=LeRobotMSHABDataConfig(
+            repo_id="trajectories_set_table_all_all_open_close_all_state_rot_6d_action_axis_angle_train",
+            base_config=DataConfig(prompt_from_task=True),
+            use_ref_action=True,
+        ),
+        batch_size=32,
 
-    #     lr_schedule=_optimizer.CosineDecaySchedule(
-    #         warmup_steps=1_000,
-    #         peak_lr=2.5e-5,
-    #         decay_steps=30_000,
-    #         decay_lr=2.5e-6,
-    #     ),
-    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-    #     num_train_steps=30_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
 
-    #     # 保存设置
-    #     checkpoint_base_dir="/media/openpi_ckpts",
-    #     save_interval=1000,
-    #     keep_period=25000,
+        # 保存设置
+        checkpoint_base_dir="/media/openpi_ckpts",
+        save_interval=1000,
+        keep_period=25000,
 
-    #     # 云平台有足够的 CPU 资源
-    #     num_workers = 8,
-    # ),
+        # 云平台有足够的 CPU 资源
+        num_workers = 8,
+    ),
     # # SetTable Open / Close, 明确使用本体感知
     # TrainConfig(
     #     name="pi05_lora_full_ref_action_set_table_open_close_state_rot_6d_action_axis_angle",
@@ -1504,47 +1668,47 @@ _CONFIGS = [
     #     # 云平台有足够的 CPU 资源
     #     num_workers = 8,
     # ),
-    # # SetTable Pick / Place
-    # TrainConfig(
-    #     name="pi05_lora_ref_action_trajectories_set_table_pick_place_state_rot_6d_action_axis_angle",
+    # SetTable Pick / Place
+    TrainConfig(
+        name="pi05_lora_ref_action_trajectories_set_table_pick_place_state_rot_6d_action_axis_angle",
 
-    #     # Pi0.5 微调
-    #     model=pi0_config.Pi0Config(
-    #         pi05=True, action_horizon=10, discrete_state_input=False,
-    #         paligemma_variant="gemma_2b_lora",
-    #         action_expert_variant="gemma_300m_lora",
-    #     ),
-    #     freeze_filter=pi0_config.Pi0Config(
-    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-    #     ).get_freeze_filter(),
-    #     # Turn off EMA for LoRA finetuning.
-    #     ema_decay=None,
+        # Pi0.5 微调
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
 
-    #     data=LeRobotMSHABDataConfig(
-    #         repo_id="trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
-    #         base_config=DataConfig(prompt_from_task=True),
-    #         use_ref_action=True,
-    #     ),
-    #     batch_size=32,
+        data=LeRobotMSHABDataConfig(
+            repo_id="trajectories_set_table_all_all_pick_place_all_state_rot_6d_action_axis_angle_train",
+            base_config=DataConfig(prompt_from_task=True),
+            use_ref_action=True,
+        ),
+        batch_size=32,
 
-    #     lr_schedule=_optimizer.CosineDecaySchedule(
-    #         warmup_steps=1_000,
-    #         peak_lr=2.5e-5,
-    #         decay_steps=30_000,
-    #         decay_lr=2.5e-6,
-    #     ),
-    #     optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-    #     num_train_steps=30_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
 
-    #     # 保存设置
-    #     checkpoint_base_dir="/media/openpi_ckpts",
-    #     save_interval=1000,
-    #     keep_period=25000,
+        # 保存设置
+        checkpoint_base_dir="/media/openpi_ckpts",
+        save_interval=1000,
+        keep_period=25000,
 
-    #     # 云平台有足够的 CPU 资源
-    #     num_workers = 8,
-    # ),
+        # 云平台有足够的 CPU 资源
+        num_workers = 8,
+    ),
     ###
 
     # RoboArena & PolaRiS configs.
