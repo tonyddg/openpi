@@ -28,7 +28,7 @@ class ImageProcessConfig():
     clip_ry: int = 0
 
     def __post_init__(self):
-        if self.is_clip_image is not None:
+        if self.is_clip_image:
             if self.clip_rx <= self.clip_lx:
                 raise ValueError(f"clip_lx is greater than clip_rx")
             if self.clip_ry <= self.clip_ly:
@@ -36,7 +36,10 @@ class ImageProcessConfig():
 
     def process(self, image):
         image = _parse_image(image) # 输入 c h w 输出 h w c 
-        return image[self.clip_ly : self.clip_ry, self.clip_lx : self.clip_rx, :]
+        if self.is_clip_image:
+            return image[self.clip_ly : self.clip_ry, self.clip_lx : self.clip_rx, :]
+        else:
+            return image
 
 TianyiRepackTransform = transforms.Group(
     inputs=[
