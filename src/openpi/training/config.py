@@ -779,7 +779,9 @@ def make_tianyi_train_config(
 
     add_name_prefix: bool = False,
     # 默认从环境变量 OPENPI_CKPT_BASE 读取
-    checkpoint_base_dir: Optional[str] = None
+    checkpoint_base_dir: Optional[str] = None,
+    # 覆盖配置中的 batch size
+    batch_size: Optional[int] = None,
 ):
     finetune_config = mshab_finetune_config[finetune_type]
     model_config = pi0_config.Pi0Config(
@@ -811,7 +813,7 @@ def make_tianyi_train_config(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
         ),
-        batch_size=finetune_config["batch_size"], # type: ignore
+        batch_size=finetune_config["batch_size"] if batch_size is None else batch_size, # type: ignore
 
         lr_schedule=finetune_config["lr_schedule"], # type: ignore
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
@@ -1346,9 +1348,9 @@ _CONFIGS = [
     ### Tianyi
 
     make_tianyi_train_config(
-        "tianyi_test",
-        "tianyi_test",
-        "ae_full_vlm_lora",
+        "tianyi_pick_place_no_state",
+        "tianyi_pick_place",
+        "full_lora",
         discrete_state_input = False,
     ),
 
