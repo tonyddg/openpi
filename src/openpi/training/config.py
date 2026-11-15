@@ -782,12 +782,17 @@ def make_tianyi_train_config(
     checkpoint_base_dir: Optional[str] = None,
     # 覆盖配置中的 batch size
     batch_size: Optional[int] = None,
+
+    small_max_token_len: bool = True,
+    action_horizon: int = 10
 ):
     finetune_config = mshab_finetune_config[finetune_type]
     model_config = pi0_config.Pi0Config(
-        pi05 = True, action_horizon = 10, discrete_state_input = discrete_state_input,
+        pi05 = True, action_horizon = action_horizon, discrete_state_input = discrete_state_input,
         paligemma_variant = finetune_config["paligemma_variant"],  # type: ignore
-        action_expert_variant = finetune_config["action_expert_variant"] # type: ignore
+        action_expert_variant = finetune_config["action_expert_variant"], # type: ignore
+        # 降低 max_token_len 提高推理速度
+        max_token_len = 96 if small_max_token_len else 200,
     )
     if checkpoint_base_dir is None:
         checkpoint_base_dir = os.environ.get("OPENPI_CKPT_BASE", "/media/openpi_ckpts")
@@ -1352,6 +1357,14 @@ _CONFIGS = [
         "tianyi_pick_place",
         "full_lora",
         discrete_state_input = False,
+    ),
+    make_tianyi_train_config(
+        "tianyi_pick_place_with_state_long_horizon",
+        "tianyi_pick_place",
+        "full_lora",
+        # 适当增加 action horizon 
+        action_horizon = 24,
+        discrete_state_input = True,
     ),
 
     # TrainConfig(
