@@ -1363,7 +1363,7 @@ _CONFIGS = [
         "tianyi_pick_place",
         "full_lora",
         # 适当增加 action horizon 
-        action_horizon = 24,
+        action_horizon = 20,
         discrete_state_input = True,
     ),
 
