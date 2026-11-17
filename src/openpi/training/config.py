@@ -741,6 +741,8 @@ def make_mshab_train_config(
 ##### tianyi
 
 import openpi.tianyi.tianyi_policy as tianyi_policy
+import openpi.tianyi.tianyi_qpos_policy as tianyi_qpos_policy
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotTianyiDataConfig(DataConfigFactory):
     """
@@ -748,17 +750,29 @@ class LeRobotTianyiDataConfig(DataConfigFactory):
     For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
     comments below.
     """
-    
+
+    # 是否使用运动坐标系表示的动作, 否则使用 MSHAB 原始全身动作
+    use_ref_action: bool = True
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
 
-        repack_transform = tianyi_policy.TianyiRepackTransform
-        data_transforms = _transforms.Group(
-            inputs=[tianyi_policy.TianyiInputs(model_type = model_config.model_type)],
-            outputs=[tianyi_policy.TianyiOutputs()],
-        )
-        model_transforms = ModelTransformFactory()(model_config)
-        action_sequence_keys = ("pi0_actions_ref", )
+        if self.use_ref_action:
+            repack_transform = tianyi_policy.TianyiRepackTransform
+            data_transforms = _transforms.Group(
+                inputs=[tianyi_policy.TianyiInputs(model_type = model_config.model_type)],
+                outputs=[tianyi_policy.TianyiOutputs()],
+            )
+            model_transforms = ModelTransformFactory()(model_config)
+            action_sequence_keys = ("pi0_actions_ref", )
+        else:
+            repack_transform = tianyi_qpos_policy.TianyiRepackTransform
+            data_transforms = _transforms.Group(
+                inputs=[tianyi_qpos_policy.TianyiInputs(model_type = model_config.model_type)],
+                outputs=[tianyi_qpos_policy.TianyiOutputs()],
+            )
+            model_transforms = ModelTransformFactory()(model_config)
+            action_sequence_keys = ("policy_action", "pi0_actions_ref")
 
         # We return all data transforms for training and inference. No need to change anything here.
         return dataclasses.replace(
@@ -776,6 +790,7 @@ def make_tianyi_train_config(
 
     finetune_type: Literal["full_lora_legacy", "full_lora", "full_finetune", "ae_full_vlm_lora"] = "full_lora_legacy",
     discrete_state_input: bool = False,
+    is_direct_pi0: bool = False,
 
     add_name_prefix: bool = False,
     # 默认从环境变量 OPENPI_CKPT_BASE 读取
@@ -817,6 +832,7 @@ def make_tianyi_train_config(
         data=LeRobotTianyiDataConfig(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
+            use_ref_action = not is_direct_pi0
         ),
         batch_size=finetune_config["batch_size"] if batch_size is None else batch_size, # type: ignore
 
@@ -1364,6 +1380,14 @@ _CONFIGS = [
         "full_lora",
         # 适当增加 action horizon 
         action_horizon = 20,
+        discrete_state_input = True,
+    ),
+
+    make_tianyi_train_config(
+        "tianyi_pick_place_direct_pi0",
+        "tianyi_test",
+        "full_lora",
+        is_direct_pi0 = True,
         discrete_state_input = True,
     ),
 
