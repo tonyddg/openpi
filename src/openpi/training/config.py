@@ -1385,7 +1385,7 @@ _CONFIGS = [
 
     make_tianyi_train_config(
         "tianyi_pick_place_direct_pi0",
-        "tianyi_test",
+        "tianyi_pick_place",
         "full_lora",
         is_direct_pi0 = True,
         discrete_state_input = True,
