@@ -1,6 +1,7 @@
 # openpi
 
 > 修改 openpi/src/openpi/models/pi0.py 当前仅支持最多两路图像
+> 修改 src/openpi/training/config.py 当前支持传入 idle mask 过滤空动作
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
 

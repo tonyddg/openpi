@@ -99,6 +99,8 @@ class DataConfig:
     # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
 
+    # None 表示不启用 idle mask
+    idle_keep_indices_path: Optional[str] = None
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -754,6 +756,9 @@ class LeRobotTianyiDataConfig(DataConfigFactory):
     # 是否使用运动坐标系表示的动作, 否则使用 MSHAB 原始全身动作
     use_ref_action: bool = True
 
+    # None 表示不启用 idle mask
+    idle_keep_indices_path: Optional[str] = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
 
@@ -781,7 +786,10 @@ class LeRobotTianyiDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
 
-            action_sequence_keys = action_sequence_keys
+            action_sequence_keys = action_sequence_keys,
+
+            # 新增
+            idle_keep_indices_path=self.idle_keep_indices_path,
         )
 
 def make_tianyi_train_config(
@@ -797,6 +805,9 @@ def make_tianyi_train_config(
     checkpoint_base_dir: Optional[str] = None,
     # 覆盖配置中的 batch size
     batch_size: Optional[int] = None,
+
+    # None 表示不启用 idle mask
+    idle_keep_indices_path: Optional[str] = None,
 
     small_max_token_len: bool = True,
     action_horizon: int = 10
@@ -832,7 +843,8 @@ def make_tianyi_train_config(
         data=LeRobotTianyiDataConfig(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
-            use_ref_action = not is_direct_pi0
+            use_ref_action = not is_direct_pi0,
+            idle_keep_indices_path = idle_keep_indices_path
         ),
         batch_size=finetune_config["batch_size"] if batch_size is None else batch_size, # type: ignore
 
@@ -1374,6 +1386,15 @@ _CONFIGS = [
         "full_lora",
         discrete_state_input = False,
     ),
+
+    make_tianyi_train_config(
+        "tianyi_pick_place_no_state_filter_idle",
+        "tianyi_pick_place",
+        "full_lora",
+        discrete_state_input = False,
+        idle_keep_indices_path = "/media/dataset/lerobot/tianyi_pick_place/mask_full.npz",
+    ),
+
     make_tianyi_train_config(
         "tianyi_pick_place_with_state_long_horizon",
         "tianyi_pick_place",

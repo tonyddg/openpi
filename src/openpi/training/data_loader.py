@@ -127,26 +127,179 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+# def create_torch_dataset(
+#     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+# ) -> Dataset:
+#     """Create a dataset for training."""
+#     repo_id = data_config.repo_id
+#     if repo_id is None:
+#         raise ValueError("Repo ID is not set. Cannot create dataset.")
+#     if repo_id == "fake":
+#         return FakeDataset(model_config, num_samples=1024)
+
+#     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+#     dataset = lerobot_dataset.LeRobotDataset(
+#         data_config.repo_id,
+#         delta_timestamps={
+#             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+#         },
+#     )
+
+#     if data_config.prompt_from_task:
+#         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+#     return dataset
+
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
 ) -> Dataset:
     """Create a dataset for training."""
+
+    import json
+
     repo_id = data_config.repo_id
     if repo_id is None:
-        raise ValueError("Repo ID is not set. Cannot create dataset.")
-    if repo_id == "fake":
-        return FakeDataset(model_config, num_samples=1024)
+        raise ValueError("Repo ID is not set.")
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    if repo_id == "fake":
+        return FakeDataset(
+            model_config, num_samples=1024
+        )
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
+        repo_id
+    )
+
+    # 1. 创建完整 LeRobot Dataset
     dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
+        repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            key: [
+                t / dataset_meta.fps
+                for t in range(action_horizon)
+            ]
+            for key in data_config.action_sequence_keys
         },
     )
 
+    # 2. 使用 Idle Mask 过滤训练采样起点
+    mask_path = data_config.idle_keep_indices_path
+
+    if mask_path is not None:
+        logging.info(
+            "Loading Tianyi idle mask: %s", mask_path
+        )
+
+        with np.load(
+            mask_path, allow_pickle=False
+        ) as mask_data:
+            keep_indices = np.asarray(
+                mask_data["keep_indices"],
+                dtype=np.int64,
+            )
+            keep_mask = np.asarray(
+                mask_data["keep_mask"],
+                dtype=bool,
+            )
+            mask_episode_index = np.asarray(
+                mask_data["episode_index"],
+                dtype=np.int64,
+            )
+            metadata = json.loads(
+                mask_data["metadata_json"].item()
+            )
+
+        # 检查数据集和 Horizon 是否一致
+        if metadata["repo_id"] != repo_id:
+            raise ValueError(
+                "Idle mask repo_id mismatch"
+            )
+
+        if (
+            metadata["config"]["horizon"]
+            != action_horizon
+        ):
+            raise ValueError(
+                "Idle mask action_horizon mismatch"
+            )
+
+        if len(keep_mask) != len(dataset):
+            raise ValueError(
+                "Idle mask dataset length mismatch"
+            )
+
+        mask_fps = metadata.get("fps")
+        if (
+            mask_fps is not None
+            and not np.isclose(
+                float(mask_fps),
+                float(dataset_meta.fps),
+            )
+        ):
+            raise ValueError(
+                "Idle mask FPS mismatch"
+            )
+
+        # 防止不同版本数据集发生索引错位
+        actual_episode_index = np.asarray(
+            dataset.hf_dataset
+            .select_columns(["episode_index"])
+            .with_format("numpy")["episode_index"],
+            dtype=np.int64,
+        ).reshape(-1)
+
+        if not np.array_equal(
+            actual_episode_index,
+            mask_episode_index,
+        ):
+            raise ValueError(
+                "Idle mask episode indexing mismatch"
+            )
+
+        if (
+            keep_indices.ndim != 1
+            or len(keep_indices) == 0
+        ):
+            raise ValueError(
+                "No valid keep_indices"
+            )
+
+        if not np.array_equal(
+            np.flatnonzero(keep_mask),
+            keep_indices,
+        ):
+            raise ValueError(
+                "keep_indices and keep_mask mismatch"
+            )
+
+        # 3. Subset 只改变采样索引
+        original_size = len(dataset)
+
+        dataset = torch.utils.data.Subset(
+            dataset,
+            keep_indices.tolist(),
+        )
+
+        logging.info(
+            "Idle filtering: %d / %d "
+            "samples kept (%.2f%%)",
+            len(dataset),
+            original_size,
+            100.0 * len(dataset) / original_size,
+        )
+
+    # 4. 原有 Prompt Transform
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(
+            dataset,
+            [
+                _transforms.PromptFromLeRobotTask(
+                    dataset_meta.tasks
+                )
+            ],
+        )
 
     return dataset
 
