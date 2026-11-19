@@ -31,6 +31,10 @@ class Args:
     num_steps: int = 10
     max_guidance_weight: float = 5.0
     schedule: str = "exp"
+    # Keys in the robot-facing Policy output, and the raw input/repack path.
+    # They can differ; the model-facing key is always `actions`.
+    output_action_key: str = "actions"
+    input_action_key: str = "actions"
     warmup: bool = True
 
 
@@ -47,7 +51,8 @@ def main(args: Args):
         max_guidance_weight=args.max_guidance_weight, schedule=args.schedule,
     )
     guided = RTCPolicy(base, schedule=args.schedule,
-                       max_guidance_weight=args.max_guidance_weight)
+                       max_guidance_weight=args.max_guidance_weight,
+                       input_action_key=args.input_action_key)
     # Compile both JAX branches before admitting robots. The guided branch
     # performs VJP and can have a substantially different compilation cost.
     if args.warmup:
@@ -63,6 +68,7 @@ def main(args: Args):
         logging.info("Standard and RTC JAX samplers warmup completed")
     server = RTCWebsocketPolicyServer(
         base, guided, config=rtc_config, host=args.host, port=args.port,
+        output_action_key=args.output_action_key,
     )
     logging.info("Serving Pi0.5 with H=%d, s=%d, d=%d", H, args.s, args.d)
     server.serve_forever()

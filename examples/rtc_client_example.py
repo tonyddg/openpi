@@ -19,12 +19,13 @@ def create_client(mode: str, host: str, port: int):
     raise ValueError(mode)
 
 
-def run_episode(client, get_observation, execute_action, safe_stop, num_steps: int):
+def run_episode(client, get_observation, execute_action, safe_stop, num_steps: int,
+                *, action_key: str = "actions"):
     client.reset()
     try:
         for _ in range(num_steps):
             output = client.infer(get_observation())
-            execute_action(output["actions"])
+            execute_action(output[action_key])
     except Exception:  # include robot execution errors
         safe_stop()
         client.reset()
@@ -33,4 +34,5 @@ def run_episode(client, get_observation, execute_action, safe_stop, num_steps: i
 
 # Example, after robot initialization:
 # client = create_client("rtc", "127.0.0.1", 8000)
-# run_episode(client, robot.observe, robot.execute_action, robot.stop, 1000)
+# action_key = "action"  # if configured with --output-action-key action
+# run_episode(client, robot.observe, robot.execute_action, robot.stop, 1000, action_key=action_key)

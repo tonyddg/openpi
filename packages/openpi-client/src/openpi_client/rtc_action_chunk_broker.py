@@ -30,6 +30,9 @@ class RTCActionChunkBroker(base_policy.BasePolicy):
         if int(cfg["protocol_version"]) != 1:
             raise ValueError("Unsupported RTC protocol version")
         self.H, self.s = int(cfg["H"]), int(cfg["s"])
+        self._action_key = cfg.get("action_key", "actions")
+        if not isinstance(self._action_key, str) or not self._action_key or self._action_key == "rtc":
+            raise ValueError(f"Invalid RTC metadata action_key: {self._action_key!r}")
         self._session_id = session_id or uuid.uuid4().hex
         self._inference_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rtc-infer")
         self._control_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rtc-ack")
@@ -164,7 +167,7 @@ class RTCActionChunkBroker(base_policy.BasePolicy):
             raise RTCDeadlineError("Active chunk exhausted while new chunk unavailable: STOP robot")
         action = self._active[index].copy()
         self._step += 1
-        return {"actions": action, "rtc": {
+        return {self._action_key: action, "rtc": {
             "epoch": self._epoch, "chunk_id": self._chunk_id,
             "action_index": index, "logical_step": self._step - 1,
         }}

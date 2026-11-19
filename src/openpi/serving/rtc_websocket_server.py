@@ -17,6 +17,7 @@ import websockets
 import websockets.asyncio.server as ws_server
 
 from openpi_client import msgpack_numpy
+from openpi.policies.rtc_action_adapter import extract_robot_actions, validate_action_key
 from openpi.serving.rtc_session_manager import RTCConfig, RTCProtocolError, RTCSessionManager
 
 log = logging.getLogger(__name__)
@@ -24,7 +25,8 @@ log = logging.getLogger(__name__)
 
 class RTCWebsocketPolicyServer:
     def __init__(self, base_policy, rtc_policy, *, config: RTCConfig,
-                 host: str = "127.0.0.1", port: int = 8000):
+                 host: str = "127.0.0.1", port: int = 8000,
+                 output_action_key: str = "actions"):
         if int(rtc_policy.action_horizon) != config.H:
             raise ValueError("RTCConfig.H must match the checkpoint's action_horizon")
         self.base_policy = base_policy
@@ -33,8 +35,10 @@ class RTCWebsocketPolicyServer:
         self.config = config
         self.host = host
         self.port = port
+        self.output_action_key = validate_action_key(output_action_key, label="output_action_key")
         self._model_lock = threading.Lock()  # protect shared RNG/model invocation
-        self.metadata = {**base_policy.metadata, "rtc": config.metadata()}
+        self.metadata = {**base_policy.metadata,
+                         "rtc": {**config.metadata(), "action_key": self.output_action_key}}
 
     def _run_infer(self, ticket, obs):
         with self._model_lock:
@@ -80,7 +84,10 @@ class RTCWebsocketPolicyServer:
         start = time.monotonic()
         try:
             output = await asyncio.to_thread(self._run_infer, ticket, request["obs"])
-            reply = self.manager.finish(ticket, output["actions"])
+            robot_actions = extract_robot_actions(
+                output, output_action_key=self.output_action_key, horizon=self.config.H,
+            )
+            reply = self.manager.finish(ticket, robot_actions)
         except Exception:
             self.manager.abort(ticket)
             raise

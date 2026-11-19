@@ -5,7 +5,6 @@ Requires JAX/NNX Pi0 or Pi0.5. Torch weights are intentionally rejected.
 
 from __future__ import annotations
 
-import copy
 import time
 import types
 
@@ -16,11 +15,13 @@ import numpy as np
 from openpi.models import model as _model
 from openpi.models.pi0_rtc import sample_actions_rtc
 from openpi.models.rtc_guidance import prefix_weights
+from openpi.policies.rtc_action_adapter import prepare_model_prefix, validate_action_key
 from openpi.shared import nnx_utils
 
 
 class RTCPolicy:
-    def __init__(self, base_policy, *, schedule: str = "exp", max_guidance_weight: float = 5.0):
+    def __init__(self, base_policy, *, schedule: str = "exp", max_guidance_weight: float = 5.0,
+                 input_action_key: str = "actions"):
         if getattr(base_policy, "_is_pytorch_model", False):
             raise TypeError("This RTC sampler requires the JAX/NNX Pi0.5 checkpoint, not PyTorch safetensors")
         model = base_policy._model
@@ -30,6 +31,7 @@ class RTCPolicy:
         self._model = model
         self._schedule = schedule
         self._max_weight = float(max_guidance_weight)
+        self._input_action_key = validate_action_key(input_action_key, label="input_action_key")
         # module_jit requires a bound NNX method; no patch to the model class.
         rtc_method = types.MethodType(sample_actions_rtc, model)
         self._sample = nnx_utils.module_jit(rtc_method)
@@ -58,15 +60,11 @@ class RTCPolicy:
 
         # Crucial: rebase DeltaActions to THIS observation's state and apply the
         # SAME normalization/padding as the original training input pipeline.
-        raw = copy.deepcopy(obs)
-        raw["actions"] = aligned.copy()
-        converted = self._base._input_transform(raw)
-        model_prefix = converted.pop("actions", None)
-        if model_prefix is None:
-            raise ValueError("Input transforms dropped actions; adapt the robot-specific repack mapping")
-        model_prefix = np.asarray(model_prefix, dtype=np.float32)
-        if model_prefix.shape != (H, int(self._model.action_dim)):
-            raise ValueError(f"Model-space prefix has wrong shape: {model_prefix.shape}")
+        converted, model_prefix = prepare_model_prefix(
+            self._base._input_transform, obs, aligned,
+            input_action_key=self._input_action_key,
+            horizon=H, model_action_dim=int(self._model.action_dim),
+        )
         weights = prefix_weights(delay=inference_delay, overlap=overlap,
                                  horizon=H, schedule=self._schedule)
 
