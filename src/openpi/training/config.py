@@ -1412,6 +1412,15 @@ _CONFIGS = [
         discrete_state_input = True,
     ),
 
+    make_tianyi_train_config(
+        "tianyi_pick_place_direct_pi0_no_state_filter_idle",
+        "tianyi_pick_place",
+        "full_lora",
+        is_direct_pi0 = True,
+        discrete_state_input = False,
+        idle_keep_indices_path = "/media/dataset/lerobot/tianyi_pick_place/mask_full.npz",
+    ),
+
     # TrainConfig(
     #     name="pi05_lora_ref_action_tidy_house_all_state_rot_6d_action_axis_angle",
 
