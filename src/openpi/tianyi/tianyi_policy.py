@@ -117,7 +117,10 @@ class TianyiInputs(transforms.DataTransformFn):
         # Actions are only available during training.
         if "actions/ref" in data:
             inputs["actions"] = data["actions/ref"]
-
+        elif "pi0_actions_ref" in data:
+            # RTC Server 直接注入历史动作
+            inputs["actions"] = data["pi0_actions_ref"]
+            
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
         # stored in "prompt"; the output dict always needs to have the key "prompt").
