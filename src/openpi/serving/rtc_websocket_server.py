@@ -105,7 +105,12 @@ class RTCWebsocketPolicyServer:
                 request = None
                 try:
                     request = msgpack_numpy.unpackb(raw)
+
+                    infer_time = time.monotonic()
                     answer = await self._dispatch(request)
+                    infer_time = time.monotonic() - infer_time
+                    log.info("batch=1, infer=%.0fms", infer_time * 1000)
+
                 except (RTCProtocolError, ValueError, KeyError, TypeError) as exc:
                     answer = {"op": "error", "message": str(exc),
                               "request_id": request.get("request_id") if isinstance(request, dict) else None}
